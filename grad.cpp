@@ -225,7 +225,7 @@ void print_row(double pred, double truth) {
               << "   error: "    << std::setw(8) << std::abs(pred - truth) << "\n";
 }
 
-// 1. y = x² (1 feature, 5 points)
+// 1. y = x^2 (1 feature, 5 points)
 void test_parabola() {
     std::cout << "=== y = x^2,  x in {0..4} ===\n";
     Matrix X(5, 1);
@@ -274,7 +274,7 @@ void test_product() {
 }
 
 // 4. y = x0  (3 features, only x0 matters)
-// Checks that irrelevant features x1,x2 don't corrupt the fit.
+// Checks that irrelevant features x1,x2 don't mess up the fit
 // Points: x0 in {1..5}, x1 and x2 are noise 
 void test_irrelevant_features() {
     std::cout << "\n=== y = x0  (x1, x2 irrelevant) ===\n";

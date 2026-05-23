@@ -7,20 +7,30 @@
 #set heading(numbering: "1.")
 
 #show heading: set block(above: 2em, below: 1em)
-#show raw: set text(font: "Ioskeley Mono")
+#show raw: set text(font: "Lilex Nerd Font")
 #set table(stroke: 0.5pt)
 
 #align(center)[
   #text(size: 17pt)[Gradient Boosting in C++]
 ]
 
+= Problem Setting
+
+Suppose we observe pairs $(x, y)$ produced by some unknown relationship $f : cal(X) -> cal(Y)$, where $cal(X) subset.eq RR^p$ is the _feature space_ and $cal(Y) subset.eq RR$. A coordinate of $x in cal(X)$ is called a _feature_; for example, if $x$ describes a house, its coordinates might encode floor area, number of rooms, and year built.
+
+Our goal is to construct an approximation $hat(f) : cal(X) -> cal(Y)$ from a finite training sample
+$
+  D = {(x_1, y_1), dots, (x_N, y_N)} subset cal(X) times cal(Y),
+$
+so that $hat(f)(x) approx f(x)$ on inputs not necessarily seen during training. Gradient boosting is one method of producing such an $hat(f)$. It builds $hat(f)$ as a sum of many small, structurally simple functions called _weak learners_ (here: shallow decision trees), each fitted to correct the errors of those preceding it. The remainder of this document develops the algorithm and a C++ implementation.
+
 = Data Layer
 
-Statistical algorithms require a concrete way to store the training data. Here the dataset is represented as a matrix $X in RR^(N times p)$ and a target vector $Y in RR^N$, where $N$ is the number of observations and $p$ is the number of features.
+Statistical algorithms require a concrete way to store the training data. The matrix $X in RR^(N times p)$ has one row per observation $x_i$ and one column per feature; the vector $Y in RR^N$ holds the corresponding targets $y_i$. Here $N$ is the number of observations and $p$ the number of features.
 
 == Data Matrix
 
-$X$ is stored as a flat `std::vector<double>` with row-major index mapping $f(i,j) = i \cdot p + j$:
+$X$ is stored as a flat `std::vector<double>` with row-major index mapping $"idx"(i,j) = i dot "cols" + j$ (here `cols` $= p$):
 
 #align(center)[
   #table(
@@ -28,7 +38,7 @@ $X$ is stored as a flat `std::vector<double>` with row-major index mapping $f(i,
     align: left,
     [Matrix dimensions], [$N times p$], [`size_t rows, cols;`],
     [Elements],          [$x_(i,j) in RR$], [`std::vector<double> data;`],
-    [Index mapping],     [$f(i, j) -> "index"$], [`index = i * cols + j;`],
+    [Index mapping],     [$"idx"(i, j) -> "data position"$], [`index = i * cols + j;`],
   )
 ]
 
@@ -54,51 +64,59 @@ struct Matrix {
 
 = Supervised Learning
 
-Given a dataset $D = {(x_1, y_1), dots, (x_N, y_N)}$, the goal is to find $hat(f)$ that best approximates the true underlying relationship $f$. This is done by minimizing a loss function over the training data:
+To choose $hat(f)$ in a principled way we introduce a _loss function_ $cal(L) : cal(Y) times cal(Y) -> RR_(>=0)$, where $cal(L)(y, hat(y))$ measures the cost of predicting $hat(y)$ when the true value is $y$. The exact choice of $cal(L)$ is a modelling decision, made later. Given $cal(L)$, we pick $hat(f)$ to minimize the average loss over the training sample:
 
 $ hat(f) = limits(op("arg min"))_f frac(1, N) sum_(i=1)^N cal(L)(y_i, f(x_i)) $
 
-== $L_2$ Loss (Mean Squared Error)
+== $L_2$ Loss
 
-For continuous regression, the standard choice is MSE, which penalises predictions proportionally to their squared distance from the truth:
+For continuous regression the standard choice is the _Mean Squared Error (MSE)_, which penalises predictions proportionally to their squared distance from the truth:
 
-$ cal(L)(y, f(x)) = frac(1, 2)(y - f(x))^2 $
+$ cal(L)(y, hat(y)) = frac(1, 2)(y - hat(y))^2 $
 
 The factor of $frac(1,2)$ is a convention that cancels cleanly when differentiating.
 
 = Decision Trees
 
-A regression tree partitions the feature space into $J$ disjoint regions $R_1, dots, R_J$ and predicts a constant $c_j$ for every observation falling into region $R_j$:
+A _decision tree_ is a model that partitions $cal(X)$ into finitely many disjoint regions and assigns one prediction to each. When the prediction is a real number, as here, we call it a _regression tree_. Concretely, a regression tree partitions $cal(X)$ into $J$ disjoint regions $R_1, dots, R_J subset.eq cal(X)$ with $union.big_(j=1)^J R_j = cal(X)$, and predicts a constant $c_j$ for every $x$ falling into region $R_j$:
 
-$ f(x) = sum_(j=1)^J c_j bb(1)(x in R_j) $
+$ hat(f)(x) = sum_(j=1)^J c_j bb(1)(x in R_j) $
+
+To keep our notation clean, for each region $R_j$ we write
+$
+  I_j = {i in {1, dots, N} : x_i in R_j}
+$
+for the _index set_ of training observations falling in $R_j$. Sums of the form $sum_(i in R_j)$ in what follows are shorthand for $sum_(i in I_j)$.
 
 == Minimizing SSE
 
-The goal is to find the regions and constants that minimize the total Sum of Squared Errors:
+The goal is to find regions and constants that minimize the total Sum of Squared Errors over the training sample:
 
 $ "SSE" = sum_(j=1)^J sum_(i in R_j) (y_i - c_j)^2 $
 
 For a fixed region $R_j$, the optimal constant is found by differentiating the inner sum with respect to $c_j$ and setting it to zero:
 
-$ -2 sum_(i in R_j)(y_i - c_j) = 0 => hat(c)_j = frac(1, |R_j|) sum_(i in R_j) y_i $
+$ -2 sum_(i in R_j)(y_i - c_j) = 0 quad arrow.r.double quad hat(c)_j = frac(1, |I_j|) sum_(i in R_j) y_i $
 
 So $hat(c)_j$ is simply the mean of the targets in $R_j$.
 
 == Greedy Recursive Partitioning
 
-Finding the globally optimal partition is NP-hard, so instead a greedy top-down algorithm is used. At each node, every possible split is considered: a split is defined by a feature index $k in {1, dots, p}$ and a threshold $s$, producing two child regions:
+Finding the globally optimal partition is NP-hard, so instead a greedy top-down algorithm is used. A _node_ of the tree corresponds to a region $R subset.eq cal(X)$ and the index set $I subset.eq {1, dots, N}$ of training points lying in it; the root node corresponds to all of $cal(X)$ and $I = {1, dots, N}$. At each node we attempt to _split_ its region into two child regions, then recurse.
 
-$ R_1(k, s) = {i mid(|) x_(i,k) <= s} quad "and" quad R_2(k, s) = {i mid(|) x_(i,k) > s} $
+A split is defined by a feature index $k in {1, dots, p}$ and a threshold $s in RR$, and produces two candidate child regions
+$
+  R_1(k, s) = {x in R : x_k <= s} quad "and" quad R_2(k, s) = {x in R : x_k > s},
+$
+with corresponding index sets $I_1(k,s)$ and $I_2(k,s)$. The algorithm selects the $(k, s)$ pair that minimizes the combined SSE of the two children, evaluated using the optimal leaf constants $hat(c)_1, hat(c)_2$ for those candidates:
 
-The algorithm selects the $(k, s)$ pair that minimizes the combined SSE of the two children:
+$ min_(k, s) [ sum_(i in I_1(k,s)) (y_i - hat(c)_1)^2 + sum_(i in I_2(k,s)) (y_i - hat(c)_2)^2 ] $
 
-$ min_(k, s) [ sum_(i in R_1(k,s)) (y_i - hat(c)_1)^2 + sum_(i in R_2(k,s)) (y_i - hat(c)_2)^2 ] $
+Writing $R_m$ for the (fixed) region at the current node, this minimisation is equivalent to maximising the _variance reduction_
 
-This is equivalent to maximizing the variance reduction $Delta$ at the current node $R_m$:
+$ Delta(k, s) = "Var"(R_m) - [ frac(|I_1(k,s)|, |I_m|)"Var"(R_1(k,s)) + frac(|I_2(k,s)|, |I_m|)"Var"(R_2(k,s)) ] $
 
-$ Delta = "Var"(R_m) - [ frac(|R_1|, |R_m|)"Var"(R_1) + frac(|R_2|, |R_m|)"Var"(R_2) ] $
-
-Since $"Var"(R_m)$ is fixed for a given node, maximizing $Delta$ is the same as minimizing the weighted sum of child variances.
+over $(k, s)$. Since $"Var"(R_m)$ is fixed once the node is fixed, maximising $Delta$ is the same as minimising the weighted sum of child variances, which is what the SSE expression above encodes.
 
 = C++ Implementation of the Regression Tree
 
@@ -134,7 +152,7 @@ struct Node {
 
 For each feature column $k$, the algorithm sorts observations by $x_k$ in $O(N log N)$ time. It then sweeps through the sorted order, maintaining running sums to evaluate the SSE of each candidate split in $O(1)$ per step.
 
-The key identity is:
+The key identity, that we can use to simplify calculations is:
 
 $ sum_(i in R) (y_i - macron(y))^2 = sum_(i in R) y_i^2 - frac(1, |R|) ( sum_(i in R) y_i )^2 $
 
@@ -191,7 +209,7 @@ SplitResult find_best_split(const Matrix& X, const std::vector<double>& y, const
             if (total_sse < best_split.best_sse) {
                 best_split.best_sse = total_sse;
                 best_split.feature_idx = k;
-                best_split.threshold = (feature_vals[i].first + feature_vals[i+1].first) / 2.0; 
+                best_split.threshold = (feature_vals[i].first + feature_vals[i+1].first) / 2.0;
             }
         }
     }
@@ -214,12 +232,12 @@ Recursion stops under the following conditions:
 When recursion stops, the active node retains its initial `prediction` value (set at construction to the mean of its assigned targets), and is treated as a leaf via `is_leaf()`.
 
 ```cpp
-void build_tree_recursive(const Matrix& X, const std::vector<double>& y, const std::vector<int>& indices, 
+void build_tree_recursive(const Matrix& X, const std::vector<double>& y, const std::vector<int>& indices,
         int depth, int max_depth, std::vector<Node>& tree, int node_idx) {
     if (depth >= max_depth || indices.size() < 2) return;
 
     SplitResult best = find_best_split(X, y, indices);
-    if (best.feature_idx == -1) return; 
+    if (best.feature_idx == -1) return;
 
     tree[node_idx].feature_idx = best.feature_idx;
     tree[node_idx].threshold = best.threshold;
@@ -283,7 +301,7 @@ double predict_single_tree(const std::vector<Node>& tree, const std::vector<doub
 
 A decision tree grown to sufficient depth can perfectly fit any training dataset. This is actually a problem: a single observation changing can alter the root split, cascading into a structurally different tree. The model has high variance.
 
-Ensemble methods address this. Gradient boosting takes a sequential additive approach: instead of growing one deep tree, it combines many shallow, constrained trees (weak learners), each of which corrects the errors of its predecessors.
+Ensemble methods address this. Gradient boosting takes a sequential additive approach: instead of growing one deep tree, it combines many shallow, constrained trees (the weak learners mentioned in §1), each of which corrects the errors of its predecessors.
 
 = Gradient Descent in Function Space
 
@@ -411,7 +429,7 @@ void GradientBoostingRegressor::fit(const Matrix& X, const std::vector<double>& 
             }
 
             double tree_pred = predict_single_tree(tree, x_i);
-            F_m[i] += learning_rate * tree_pred; 
+            F_m[i] += learning_rate * tree_pred;
         }
     }
 }

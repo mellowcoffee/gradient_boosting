@@ -1,29 +1,30 @@
-<h1 align="center"> Gradient Boosting in C++ </h1>
+# Gradient Boosting in C++
 
-# Data Layer
+## 1. Problem Setting
 
-Statistical algorithms require a concrete way to store the training
-data. Here the dataset is represented as a matrix
-$`X \in {\mathbb{R}}^{N \times p}`$ and a target vector
-$`Y \in {\mathbb{R}}^{N}`$, where $`N`$ is the number of observations
-and $`p`$ is the number of features.
+Suppose we observe pairs $(x, y)$ produced by some unknown relationship $f : \mathcal{X} \to \mathcal{Y}$, where $\mathcal{X} \subseteq \mathbb{R}^p$ is the *feature space* and $\mathcal{Y} \subseteq \mathbb{R}$. A coordinate of $x \in \mathcal{X}$ is called a *feature*; for example, if $x$ describes a house, its coordinates might encode floor area, number of rooms, and year built.
 
-## Data Matrix
+Our goal is to construct an approximation $\hat{f} : \mathcal{X} \to \mathcal{Y}$ from a finite training sample
 
-$`X`$ is stored as a flat `std::vector<double>` with row-major index
-mapping $`f(i,j) = ic \cdot p + j`$:
+$$D = \{(x_1, y_1), \dots, (x_N, y_N)\} \subset \mathcal{X} \times \mathcal{Y},$$
 
-<div align="center">
+so that $\hat{f}(x) \approx f(x)$ on inputs not necessarily seen during training. Gradient boosting is one method of producing such an $\hat{f}$. It builds $\hat{f}$ as a sum of many small, structurally simple functions called *weak learners* (here: shallow decision trees), each fitted to correct the errors of those preceding it. The remainder of this document develops the algorithm and a C++ implementation.
 
-|  |  |  |
-|:---|:---|:---|
-| Matrix dimensions | $`N \times p`$ | `size_t rows, cols;` |
-| Elements | $`x_{i,j} \in {\mathbb{R}}`$ | `std::vector<double> data;` |
-| Index mapping | $`f(i,j) \rightarrow \text{ index}`$ | `index = i * cols + j;` |
+## 2. Data Layer
 
-</div>
+Statistical algorithms require a concrete way to store the training data. The matrix $X \in \mathbb{R}^{N \times p}$ has one row per observation $x_i$ and one column per feature; the vector $Y \in \mathbb{R}^N$ holds the corresponding targets $y_i$. Here $N$ is the number of observations and $p$ the number of features.
 
-``` cpp
+### 2.1. Data Matrix
+
+$X$ is stored as a flat `std::vector<double>` with row-major index mapping $\mathrm{idx}(i,j) = i \cdot \mathrm{cols} + j$ (here `cols` $= p$):
+
+| | | |
+|---|---|---|
+| Matrix dimensions | $N \times p$ | `size_t rows, cols;` |
+| Elements | $x_{i,j} \in \mathbb{R}$ | `std::vector<double> data;` |
+| Index mapping | $\mathrm{idx}(i, j) \to \text{data position}$ | `index = i * cols + j;` |
+
+```cpp
 #include <vector>
 
 struct Matrix {
@@ -43,106 +44,77 @@ struct Matrix {
 };
 ```
 
-# Supervised Learning
+## 3. Supervised Learning
 
-Given a dataset
-$`D = \left\{ \left( x_{1},y_{1} \right),\ldots,\left( x_{N},y_{N} \right) \right\}`$,
-the goal is to find $`\hat{f}`$ that best approximates the true
-underlying relationship $`f`$. This is done by minimizing a loss
-function over the training data:
+To choose $\hat{f}$ in a principled way we introduce a *loss function* $\mathcal{L} : \mathcal{Y} \times \mathcal{Y} \to \mathbb{R}_{\geq 0}$, where $\mathcal{L}(y, \hat{y})$ measures the cost of predicting $\hat{y}$ when the true value is $y$. The exact choice of $\mathcal{L}$ is a modelling decision, made later. Given $\mathcal{L}$, we pick $\hat{f}$ to minimize the average loss over the training sample:
 
-``` math
-\hat{f} = \mathop{\mathrm{arg\ min}}\limits_{f}\frac{1}{N}\sum_{i = 1}^{N}\mathcal{L}(y_{i},f\left( x_{i} \right))
-```
+$$\hat{f} = \mathop{\mathrm{arg\,min}}_f \frac{1}{N} \sum_{i=1}^N \mathcal{L}(y_i, f(x_i))$$
 
-## $`L_{2}`$ Loss (Mean Squared Error)
+### 3.1. $L_2$ Loss
 
-For continuous regression, the standard choice is MSE, which penalises
-predictions proportionally to their squared distance from the truth:
+For continuous regression the standard choice is the *Mean Squared Error (MSE)*, which penalises predictions proportionally to their squared distance from the truth:
 
-``` math
-\mathcal{L}(y,f(x)) = {\frac{1}{2}(y - f(x))}^{2}
-```
+$$\mathcal{L}(y, \hat{y}) = \frac{1}{2}(y - \hat{y})^2$$
 
-The factor of $`\frac{1}{2}`$ is a convention that cancels cleanly when
-differentiating.
+The factor of $\frac{1}{2}$ is a convention that cancels cleanly when differentiating.
 
-# Decision Trees
+## 4. Decision Trees
 
-A regression tree partitions the feature space into $`J`$ disjoint
-regions $`R_{1},\ldots,R_{J}`$ and predicts a constant $`c_{j}`$ for
-every observation falling into region $`R_{j}`$:
+A *decision tree* is a model that partitions $\mathcal{X}$ into finitely many disjoint regions and assigns one prediction to each. When the prediction is a real number, as here, we call it a *regression tree*. Concretely, a regression tree partitions $\mathcal{X}$ into $J$ disjoint regions $R_1, \dots, R_J \subseteq \mathcal{X}$ with $\bigcup_{j=1}^J R_j = \mathcal{X}$, and predicts a constant $c_j$ for every $x$ falling into region $R_j$:
 
-``` math
-f(x) = \sum_{j = 1}^{J}c_{j}\mathbb{1}(x \in R_{j})
-```
+$$\hat{f}(x) = \sum_{j=1}^J c_j \mathbb{1}(x \in R_j)$$
 
-## Minimizing SSE
+To keep our notation clean, for each region $R_j$ we write
 
-The goal is to find the regions and constants that minimize the total
-Sum of Squared Errors:
+$$I_j = \{i \in \{1, \dots, N\} : x_i \in R_j\}$$
 
-``` math
-\text{ SSE } = \sum_{j = 1}^{J}\sum_{i \in R_{j}}\left( y_{i} - c_{j} \right)^{2}
-```
+for the *index set* of training observations falling in $R_j$. Sums of the form $\sum_{i \in R_j}$ in what follows are shorthand for $\sum_{i \in I_j}$.
 
-For a fixed region $`R_{j}`$, the optimal constant is found by
-differentiating the inner sum with respect to $`c_{j}`$ and setting it
-to zero:
+### 4.1. Minimizing SSE
 
-``` math
-- 2\sum_{\left( i \in R_{j} \right)\left( y_{i} - c_{j} \right)} = 0 \Rightarrow {\hat{c}}_{j} = \frac{1}{|R_{j}|}\sum_{i \in R_{j}}y_{i}
-```
+The goal is to find regions and constants that minimize the total Sum of Squared Errors over the training sample:
 
-So $`{\hat{c}}_{j}`$ is simply the mean of the targets in $`R_{j}`$.
+$$\mathrm{SSE} = \sum_{j=1}^J \sum_{i \in R_j} (y_i - c_j)^2$$
 
-## Greedy Recursive Partitioning
+For a fixed region $R_j$, the optimal constant is found by differentiating the inner sum with respect to $c_j$ and setting it to zero:
 
-Finding the globally optimal partition is NP-hard, so instead a greedy
-top-down algorithm is used. At each node, every possible split is
-considered: a split is defined by a feature index
-$`k \in \left\{ 1,\ldots,p \right\}`$ and a threshold $`s`$, producing
-two child regions:
+$$-2 \sum_{i \in R_j}(y_i - c_j) = 0 \quad \Longrightarrow \quad \hat{c}_j = \frac{1}{|I_j|} \sum_{i \in R_j} y_i$$
 
-``` math
-R_{1}(k,s) = \left\{ i|x_{i,k} \leq s \right\}\quad\text{ and }\quad R_{2}(k,s) = \left\{ i|x_{i,k} > s \right\}
-```
+So $\hat{c}_j$ is simply the mean of the targets in $R_j$.
 
-The algorithm selects the $`(k,s)`$ pair that minimizes the combined SSE
-of the two children:
+### 4.2. Greedy Recursive Partitioning
 
-``` math
-\min\limits_{k,s}\left\lbrack \sum_{i \in R_{1}(k,s)}\left( y_{i} - {\hat{c}}_{1} \right)^{2} + \sum_{i \in R_{2}(k,s)}\left( y_{i} - {\hat{c}}_{2} \right)^{2} \right\rbrack
-```
+Finding the globally optimal partition is NP-hard, so instead a greedy top-down algorithm is used. A *node* of the tree corresponds to a region $R \subseteq \mathcal{X}$ and the index set $I \subseteq \{1, \dots, N\}$ of training points lying in it; the root node corresponds to all of $\mathcal{X}$ and $I = \{1, \dots, N\}$. At each node we attempt to *split* its region into two child regions, then recurse.
 
-This is equivalent to maximizing the variance reduction $`\Delta`$ at
-the current node $`R_{m}`$:
+A split is defined by a feature index $k \in \{1, \dots, p\}$ and a threshold $s \in \mathbb{R}$, and produces two candidate child regions
 
-``` math
-\Delta = \text{ Var}\left( R_{m} \right) - \left\lbrack \frac{|R_{1}|}{|R_{m}|}\text{Var}\left( R_{1} \right) + \frac{|R_{2}|}{|R_{m}|}\text{Var}\left( R_{2} \right) \right\rbrack
-```
+$$R_1(k, s) = \{x \in R : x_k \leq s\} \quad \text{and} \quad R_2(k, s) = \{x \in R : x_k > s\},$$
 
-Since $`\text{Var}\left( R_{m} \right)`$ is fixed for a given node,
-maximizing $`\Delta`$ is the same as minimizing the weighted sum of
-child variances.
+with corresponding index sets $I_1(k,s)$ and $I_2(k,s)$. The algorithm selects the $(k, s)$ pair that minimizes the combined SSE of the two children, evaluated using the optimal leaf constants $\hat{c}_1, \hat{c}_2$ for those candidates:
 
-# C++ Implementation of the Regression Tree
+$$\min_{k, s} \left[ \sum_{i \in I_1(k,s)} (y_i - \hat{c}_1)^2 + \sum_{i \in I_2(k,s)} (y_i - \hat{c}_2)^2 \right]$$
 
-## Node Structure
+Writing $R_m$ for the (fixed) region at the current node, this minimisation is equivalent to maximising the *variance reduction*
 
-The tree is stored as a flat `std::vector<Node>`, where parent nodes
-reference their children by vector index. This avoids pointer-based tree
-structures and keeps memory contiguous.
+$$\Delta(k, s) = \mathrm{Var}(R_m) - \left[ \frac{|I_1(k,s)|}{|I_m|}\mathrm{Var}(R_1(k,s)) + \frac{|I_2(k,s)|}{|I_m|}\mathrm{Var}(R_2(k,s)) \right]$$
 
-|               |          |                                                   |
-|:--------------|:---------|:--------------------------------------------------|
-| `feature_idx` | `int`    | Splitting feature $`k`$; $`- 1`$ indicates a leaf |
-| `threshold`   | `double` | Split threshold $`s`$                             |
-| `prediction`  | `double` | Leaf constant $`{\hat{c}}_{j}`$                   |
-| `left_child`  | `int`    | Index of child where $`x_{i,k} \leq s`$           |
-| `right_child` | `int`    | Index of child where $`x_{i,k} > s`$              |
+over $(k, s)$. Since $\mathrm{Var}(R_m)$ is fixed once the node is fixed, maximising $\Delta$ is the same as minimising the weighted sum of child variances, which is what the SSE expression above encodes.
 
-``` cpp
+## 5. C++ Implementation of the Regression Tree
+
+### 5.1. Node Structure
+
+The tree is stored as a flat `std::vector<Node>`, where parent nodes reference their children by vector index. This avoids pointer-based tree structures and keeps memory contiguous.
+
+| | | |
+|---|---|---|
+| `feature_idx` | `int` | Splitting feature $k$; $-1$ indicates a leaf |
+| `threshold` | `double` | Split threshold $s$ |
+| `prediction` | `double` | Leaf constant $\hat{c}_j$ |
+| `left_child` | `int` | Index of child where $x_{i,k} \leq s$ |
+| `right_child` | `int` | Index of child where $x_{i,k} > s$ |
+
+```cpp
 struct Node {
     int feature_idx = -1;
     double threshold = 0.0;
@@ -156,25 +128,17 @@ struct Node {
 };
 ```
 
-## $`O\left( N\log N \right)`$ Split Search
+### 5.2. $O(N \log N)$ Split Search
 
-For each feature column $`k`$, the algorithm sorts observations by
-$`x_{k}`$ in $`O\left( N\log N \right)`$ time. It then sweeps through
-the sorted order, maintaining running sums to evaluate the SSE of each
-candidate split in $`O(1)`$ per step.
+For each feature column $k$, the algorithm sorts observations by $x_k$ in $O(N \log N)$ time. It then sweeps through the sorted order, maintaining running sums to evaluate the SSE of each candidate split in $O(1)$ per step.
 
-The key identity is:
+The key identity, that we can use to simplify calculations is:
 
-``` math
-\sum_{i \in R}\left( y_{i} - \overline{y} \right)^{2} = \sum_{i \in R}y_{i}^{2} - \frac{1}{|R|}\left( \sum_{i \in R}y_{i} \right)^{2}
-```
+$$\sum_{i \in R} (y_i - \bar{y})^2 = \sum_{i \in R} y_i^2 - \frac{1}{|R|} \left( \sum_{i \in R} y_i \right)^2$$
 
-This lets SSE be updated incrementally as observations shift from the
-right child to the left, rather than being recomputed from scratch. The
-full split search over all $`p`$ features costs
-$`O\left( pN\log N \right)`$ per node.
+This lets SSE be updated incrementally as observations shift from the right child to the left, rather than being recomputed from scratch. The full split search over all $p$ features costs $O(p N \log N)$ per node.
 
-``` cpp
+```cpp
 struct SplitResult {
     int feature_idx = -1;
     double threshold = 0.0;
@@ -225,7 +189,7 @@ SplitResult find_best_split(const Matrix& X, const std::vector<double>& y, const
             if (total_sse < best_split.best_sse) {
                 best_split.best_sse = total_sse;
                 best_split.feature_idx = k;
-                best_split.threshold = (feature_vals[i].first + feature_vals[i+1].first) / 2.0; 
+                best_split.threshold = (feature_vals[i].first + feature_vals[i+1].first) / 2.0;
             }
         }
     }
@@ -233,37 +197,27 @@ SplitResult find_best_split(const Matrix& X, const std::vector<double>& y, const
 }
 ```
 
-The threshold is set to the midpoint between adjacent sorted values, so
-new observations can be compared cleanly against it.
+The threshold is set to the midpoint between adjacent sorted values, so new observations can be compared cleanly against it.
 
-## Tree Construction and Stopping Criteria
+### 5.3. Tree Construction and Stopping Criteria
 
-The tree is built recursively. At each recursive call, `find_best_split`
-is invoked on the current node’s index subset. If a valid split is
-found, two child nodes are pushed onto the `std::vector<Node>` and the
-function recurses on each.
+The tree is built recursively. At each recursive call, `find_best_split` is invoked on the current node's index subset. If a valid split is found, two child nodes are pushed onto the `std::vector<Node>` and the function recurses on each.
 
 Recursion stops under the following conditions:
 
 - **Maximum depth reached:** the depth parameter equals `max_depth`.
+- **Insufficient observations:** fewer than 2 samples remain at the node, making a split impossible.
+- **No valid split found:** all observations share the same feature value (the split search returns `feature_idx == -1`).
 
-- **Insufficient observations:** fewer than 2 samples remain at the
-  node, making a split impossible.
+When recursion stops, the active node retains its initial `prediction` value (set at construction to the mean of its assigned targets), and is treated as a leaf via `is_leaf()`.
 
-- **No valid split found:** all observations share the same feature
-  value (the split search returns `feature_idx == -1`).
-
-When recursion stops, the active node retains its initial `prediction`
-value (set at construction to the mean of its assigned targets), and is
-treated as a leaf via `is_leaf()`.
-
-``` cpp
-void build_tree_recursive(const Matrix& X, const std::vector<double>& y, const std::vector<int>& indices, 
+```cpp
+void build_tree_recursive(const Matrix& X, const std::vector<double>& y, const std::vector<int>& indices,
         int depth, int max_depth, std::vector<Node>& tree, int node_idx) {
     if (depth >= max_depth || indices.size() < 2) return;
 
     SplitResult best = find_best_split(X, y, indices);
-    if (best.feature_idx == -1) return; 
+    if (best.feature_idx == -1) return;
 
     tree[node_idx].feature_idx = best.feature_idx;
     tree[node_idx].threshold = best.threshold;
@@ -305,13 +259,11 @@ std::vector<Node> build_tree(const Matrix& X, const std::vector<double>& y, cons
 }
 ```
 
-## Prediction
+### 5.4. Prediction
 
-To predict for a single observation $`x_{i}`$, the tree is traversed
-from the root by following left or right branches based on threshold
-comparisons, until a leaf is reached:
+To predict for a single observation $x_i$, the tree is traversed from the root by following left or right branches based on threshold comparisons, until a leaf is reached:
 
-``` cpp
+```cpp
 double predict_single_tree(const std::vector<Node>& tree, const std::vector<double>& x_i) {
     int curr = 0;
     while (!tree[curr].is_leaf()) {
@@ -325,146 +277,89 @@ double predict_single_tree(const std::vector<Node>& tree, const std::vector<doub
 }
 ```
 
-# Limitations of a Single Tree
+## 6. Limitations of a Single Tree
 
-A decision tree grown to sufficient depth can perfectly fit any training
-dataset. This is actually a problem: a single observation changing can
-alter the root split, cascading into a structurally different tree. The
-model has high variance.
+A decision tree grown to sufficient depth can perfectly fit any training dataset. This is actually a problem: a single observation changing can alter the root split, cascading into a structurally different tree. The model has high variance.
 
-Ensemble methods address this. Gradient boosting takes a sequential
-additive approach: instead of growing one deep tree, it combines many
-shallow, constrained trees (weak learners), each of which corrects the
-errors of its predecessors.
+Ensemble methods address this. Gradient boosting takes a sequential additive approach: instead of growing one deep tree, it combines many shallow, constrained trees (the weak learners mentioned in §1), each of which corrects the errors of its predecessors.
 
-# Gradient Descent in Function Space
+## 7. Gradient Descent in Function Space
 
-## Classical Parameter Gradient Descent
+### 7.1. Classical Parameter Gradient Descent
 
-In parametric models (e.g. linear regression, neural networks), there is
-a finite weight vector $`\theta \in {\mathbb{R}}^{d}`$ to optimize. The
-update rule is:
+In parametric models (e.g. linear regression, neural networks), there is a finite weight vector $\theta \in \mathbb{R}^d$ to optimize. The update rule is:
 
-``` math
-\theta_{m} = \theta_{m - 1} - \eta\nabla_{\theta}\mathcal{L}(\theta_{m - 1})
-```
+$$\theta_m = \theta_{m-1} - \eta \nabla_\theta \mathcal{L}(\theta_{m-1})$$
 
-The gradient points in the direction of steepest ascent of
-$`\mathcal{L}`$; subtracting it (scaled by learning rate $`\eta`$) moves
-$`\theta`$ toward a minimum.
+The gradient points in the direction of steepest ascent of $\mathcal{L}$; subtracting it (scaled by learning rate $\eta$) moves $\theta$ toward a minimum.
 
-## From Parameter Space to Function Space
+### 7.2. From Parameter Space to Function Space
 
-Gradient boosting has no fixed weight vector. Instead, the object being
-updated is the prediction function $`F`$ itself, evaluated at each
-training point. The current model’s predictions form a vector in
-$`{\mathbb{R}}^{N}`$:
+Gradient boosting has no fixed weight vector. Instead, the object being updated is the prediction function $F$ itself, evaluated at each training point. The current model's predictions form a vector in $\mathbb{R}^N$:
 
-``` math
-\hat{F} = \begin{pmatrix}
-F\left( x_{1} \right) \\
-F\left( x_{2} \right) \\
- \vdots \\
-F\left( x_{N} \right)
-\end{pmatrix}
-```
+$$\hat{F} = \begin{pmatrix} F(x_1) \\ F(x_2) \\ \vdots \\ F(x_N) \end{pmatrix}$$
 
-The gradient of the empirical loss with respect to these predictions is
-computed pointwise:
+The gradient of the empirical loss with respect to these predictions is computed pointwise:
 
-``` math
-g_{i} = \frac{\partial\mathcal{L}(y_{i},F\left( x_{i} \right))}{\partial F\left( x_{i} \right)}|_{F = F_{m - 1}}
-```
+$$g_i = \left.\frac{\partial \mathcal{L}(y_i, F(x_i))}{\partial F(x_i)}\right|_{F = F_{m-1}}$$
 
-For $`L_{2}`$ loss, this is:
+For $L_2$ loss, this is:
 
-``` math
-\frac{\partial\mathcal{L}(y_{i},F\left( x_{i} \right))}{\partial F\left( x_{i} \right)} = - \left( y_{i} - F\left( x_{i} \right) \right)
-```
+$$\frac{\partial \mathcal{L}(y_i, F(x_i))}{\partial F(x_i)} = -(y_i - F(x_i))$$
 
 So the negative gradient is just the raw residual:
 
-``` math
-- g_{i} = y_{i} - F\left( x_{i} \right)
-```
+$$-g_i = y_i - F(x_i)$$
 
 A gradient descent step in function space then looks like:
 
-``` math
-F_{m\left( x_{i} \right)} = F_{(m - 1)\left( x_{i} \right)} + \eta\left( y_{i} - F_{(m - 1)\left( x_{i} \right)} \right)
-```
+$$F_m(x_i) = F_{m-1}(x_i) + \eta (y_i - F_{m-1}(x_i))$$
 
-## Generalizing with a Weak Learner
+### 7.3. Generalizing with a Weak Learner
 
-The negative gradients $`- g_{i}`$ are only defined at the $`N`$
-training points. To generalize to unseen $`x`$, a shallow decision tree
-$`h_{m(x)}`$ is fitted to predict $`- g_{i}`$ from $`x_{i}`$. This
-extends the gradient step to the full input space:
+The negative gradients $-g_i$ are only defined at the $N$ training points. To generalize to unseen $x$, a shallow decision tree $h_m(x)$ is fitted to predict $-g_i$ from $x_i$. This extends the gradient step to the full input space:
 
-``` math
-F_{m(x)} = F_{(m - 1)(x)} + \eta h_{m(x)}
-```
+$$F_m(x) = F_{m-1}(x) + \eta h_m(x)$$
 
-The ensemble built by repeating this process is gradient descent in an
-infinite-dimensional function space, with trees serving as the update
-direction at each step.
+The ensemble built by repeating this process is gradient descent in an infinite-dimensional function space, with trees serving as the update direction at each step.
 
-# The Gradient Boosting Algorithm
+## 8. The Gradient Boosting Algorithm
 
-## Initialization
+### 8.1. Initialization
 
-The algorithm begins with the constant prediction that minimizes the
-total loss. For $`L_{2}`$, this is the global mean:
+The algorithm begins with the constant prediction that minimizes the total loss. For $L_2$, this is the global mean:
 
-``` math
-F_{0}(x) = \mathop{\mathrm{arg\ min}}\limits_{c}\sum_{i = 1}^{N}\mathcal{L}(y_{i},c) = \frac{1}{N}\sum_{i = 1}^{N}y_{i} = \overline{y}
-```
+$$F_0(x) = \mathop{\mathrm{arg\,min}}_c \sum_{i=1}^N \mathcal{L}(y_i, c) = \frac{1}{N} \sum_{i=1}^N y_i = \bar{y}$$
 
-## Boosting Loop (for $`m = 1`$ to $`M`$)
+### 8.2. Boosting Loop (for $m = 1$ to $M$)
 
 Each iteration executes the following steps.
 
-**Step 1 — Compute pseudo-residuals.** For each $`i`$, evaluate the
-negative gradient of the loss at the current ensemble prediction:
+**Step 1 — Compute pseudo-residuals.** For each $i$, evaluate the negative gradient of the loss at the current ensemble prediction:
 
-``` math
-r_{i,m} = - \frac{\partial\mathcal{L}(y_{i},F\left( x_{i} \right))}{\partial F\left( x_{i} \right)}|_{F = F_{m - 1}} = y_{i} - F_{(m - 1)\left( x_{i} \right)}
-```
+$$r_{i,m} = -\left.\frac{\partial \mathcal{L}(y_i, F(x_i))}{\partial F(x_i)}\right|_{F = F_{m-1}} = y_i - F_{m-1}(x_i)$$
 
-**Step 2 — Fit a weak learner.** Train a regression tree $`h_{m(x)}`$ on
-the dataset $`\left( X,r_{m} \right)`$, where
-$`r_{m} = \left( r_{1,m},\ldots,r_{N,m} \right)`$.
+**Step 2 — Fit a weak learner.** Train a regression tree $h_m(x)$ on the dataset $(X, r_m)$, where $r_m = (r_{1,m}, \dots, r_{N,m})$.
 
-**Step 3 — Compute optimal leaf values.** For each leaf region
-$`R_{j,m}`$, find the constant $`\gamma_{j,m}`$ minimizing the loss:
+**Step 3 — Compute optimal leaf values.** For each leaf region $R_{j,m}$, find the constant $\gamma_{j,m}$ minimizing the loss:
 
-``` math
-\gamma_{j,m} = \mathop{\mathrm{arg\ min}}\limits_{\gamma}\sum_{x_{i} \in R_{j,m}}\mathcal{L}(y_{i},F_{(m - 1)\left( x_{i} \right)} + \gamma)
-```
+$$\gamma_{j,m} = \mathop{\mathrm{arg\,min}}_\gamma \sum_{x_i \in R_{j,m}} \mathcal{L}(y_i, F_{m-1}(x_i) + \gamma)$$
 
-For $`L_{2}`$ loss, this is the mean of the pseudo-residuals in the leaf
-— exactly what a regression tree already computes. Step 3 is therefore
-absorbed automatically into tree construction.
+For $L_2$ loss, this is the mean of the pseudo-residuals in the leaf — exactly what a regression tree already computes. Step 3 is therefore absorbed automatically into tree construction.
 
-**Step 4 — Update the ensemble.** Shrink the new tree by learning rate
-$`0 < \nu \leq 1`$ and add it to the model:
+**Step 4 — Update the ensemble.** Shrink the new tree by learning rate $0 < \nu \leq 1$ and add it to the model:
 
-``` math
-F_{m(x)} = F_{(m - 1)(x)} + \nu\sum_{j = 1}^{J_{m}}\gamma_{j,m}\mathbb{1}(x \in R_{j,m})
-```
+$$F_m(x) = F_{m-1}(x) + \nu \sum_{j=1}^{J_m} \gamma_{j,m} \mathbb{1}(x \in R_{j,m})$$
 
-Choosing $`\nu < 1`$ prevents each tree from contributing too
-aggressively. Small $`\nu`$ (e.g. 0.1) acts as regularization, reducing
-overfitting at the cost of requiring more trees.
+Choosing $\nu < 1$ prevents each tree from contributing too aggressively. Small $\nu$ (e.g. 0.1) acts as regularization, reducing overfitting at the cost of requiring more trees.
 
-# C++ Implementation
+## 9. C++ Implementation
 
-## Model Structure
+### 9.1. Model Structure
 
-The `GradientBoostingRegressor` stores the initial prediction, the
-learning rate, and the full ensemble of trees:
+The `GradientBoostingRegressor` stores the initial prediction, the learning rate, and the full ensemble of trees:
 
-``` cpp
+```cpp
 struct GradientBoostingRegressor {
     int n_estimators;
     double learning_rate;
@@ -483,9 +378,9 @@ struct GradientBoostingRegressor {
 };
 ```
 
-## Training
+### 9.2. Training
 
-``` cpp
+```cpp
 void GradientBoostingRegressor::fit(const Matrix& X, const std::vector<double>& Y) {
     size_t N = Y.size();
 
@@ -514,20 +409,17 @@ void GradientBoostingRegressor::fit(const Matrix& X, const std::vector<double>& 
             }
 
             double tree_pred = predict_single_tree(tree, x_i);
-            F_m[i] += learning_rate * tree_pred; 
+            F_m[i] += learning_rate * tree_pred;
         }
     }
 }
 ```
 
-Because `build_tree` stores the arithmetic mean of its target values in
-each leaf, and the optimal $`\gamma_{j,m}`$ for $`L_{2}`$ loss is also
-that arithmetic mean, Steps 2 and 3 are merged into a single tree-fit
-call.
+Because `build_tree` stores the arithmetic mean of its target values in each leaf, and the optimal $\gamma_{j,m}$ for $L_2$ loss is also that arithmetic mean, Steps 2 and 3 are merged into a single tree-fit call.
 
-## Inference
+### 9.3. Inference
 
-``` cpp
+```cpp
 double GradientBoostingRegressor::predict(const std::vector<double>& x_i) const {
     double final_prediction = initial_prediction;
     for (size_t m = 0; m < ensemble.size(); ++m) {
@@ -537,5 +429,4 @@ double GradientBoostingRegressor::predict(const std::vector<double>& x_i) const 
 }
 ```
 
-The final prediction reconstructs
-$`F_{M(x)} = F_{0} + \nu\sum_{m = 1}^{M}h_{m(x)}`$ exactly.
+The final prediction reconstructs $F_M(x) = F_0 + \nu \sum_{m=1}^M h_m(x)$ exactly.
