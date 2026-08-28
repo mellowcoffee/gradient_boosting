@@ -231,7 +231,7 @@ void test_parabola() {
     Matrix X(5, 1);
     std::vector<double> y = {0, 1, 4, 9, 16};
     for (size_t i = 0; i < 5; ++i) X.at(i,0) = i;
-    GradientBoostingRegressor gbm(50, 0.1, 3);
+    GradientBoostingRegressor gbm(150, 0.1, 3);
     gbm.fit(X, y);
     for (int x = 0; x <= 4; ++x)
         print_row(gbm.predict({(double)x}), x*x);
